@@ -14,6 +14,48 @@ from matplotlib import cm
 import pandas as pd
 from collections import defaultdict
 
+
+def fragility(G,threshold,avg):
+    '''
+    this function calculates a possible fragility thingamagig while looking at three parameters.
+    first, "cent", having nonzero amount of fragile neighborts.
+    second, "fragile", is 1 if the node itself is fragile and 0 otherwise
+    third, "percolating" is the product of the two, i.e. it's nonzero for nodes that are both fragile and have fragile neighbors.
+    '''
+    if threshold<=1:
+        th = 1/(1-threshold)
+    else:
+        th = threshold
+    test = {j:sum((G.degree(i)< th for i in G.neighbors_iter(j))) for j in G.nodes_iter()}
+    test2 = {j: 0 if G.degree(j) > th else 1 for j in G.nodes_iter()}
+    for node, data in G.nodes_iter(data=True):
+        data['cent'] = test[node]
+        data['fragile'] = test2[node]
+        data['percolating'] = test2[node] * test[node]
+    frag = nx.Graph()
+    perc = nx.Graph()
+    cent = nx.Graph()
+    for e in G.edges_iter():
+        if G.node[e[0]]['fragile'] > 0 and G.node[e[1]]['fragile'] > 0:
+            frag.add_edge(*e)
+        if G.node[e[0]]['cent'] > 0 and G.node[e[1]]['cent'] > 0:
+            cent.add_edge(*e)
+        if G.node[e[0]]['fragile'] > 0 and G.node[e[1]]['fragile'] > 0 and \
+                        G.node[e[0]]['cent'] > 1 and G.node[e[1]]['cent'] > 1 :
+            perc.add_edge(*e)
+    safe_perc = nx.Graph()
+    safe_perc_val = nx.Graph()
+    av = min((np.mean(perc.degree().values()))**(0.5),0.5*avg)
+    for e in perc.edges_iter():
+        if (perc.degree(e[0])>av and  perc.degree(e[1])>av) or (perc.degree(e[0])>av and perc.degree(e[1])>av):
+            safe_perc.add_edge(*e)
+        if (G.node[e[0]]['percolating'] > 2 and G.node[e[1]]['percolating'] > 2) or \
+        (G.node[e[0]]['percolating'] > 2 and G.node[e[1]]['percolating'] > 2):
+            safe_perc_val.add_edge(*e)
+    return frag, cent, perc, safe_perc,safe_perc_val
+
+
+
 def paper_plot(list_of_points,reverse = False):
     fig, axes = plt.subplots(2,sharex=True)
     if reverse:
@@ -74,6 +116,10 @@ def calc_min_holdings(average,power):
 
 
 def frag_centrality(G,th):
+    '''
+    this is probably not a good way to calculate fragility since this only counts how many fragile neighbors i have
+    and ignores whether or not i'm fragile. the above fragility function probably does this better
+    '''
     out = {n:sum([G.degree(i)<(1/(1-th)) for i in G.neighbors_iter(n)]) for n in G.nodes_iter() if n.startswith('b')}
     return out
 
@@ -143,7 +189,8 @@ def setup_network(num_of_banks,num_of_assets,round_rvs,kind='man_half_half',p=2.
                 G.add_edges_from([('b'+str(i),'a'+str(k)) for k in np.random.choice(num_of_assets,int(j),replace=False)])
             print 'power law: ', average_degree(G)
         elif kind == 'auto_half_and_half':
-            temp_rvs = round_rvs[:-1]        
+            temp_rvs = round_rvs[:-1]
+
             while True:            
                 pois = np.random.poisson(np.mean(round_rvs),num_of_assets)
                 pd.Series(pois).hist()
@@ -230,15 +277,15 @@ for hit_probability in [0.0001]:
         '''
         th_base = np.arange(0.01,6,0.01)
         if fract_threshold:
-            health_threshold = np.arange(0.5,1,0.001)
+            health_threshold = np.arange(0.6,1,0.01)
         else:
             health_threshold = np.arange(0,8,0.01)#, th_base/((1+th_base)**fract_threshold)#np.arange(0,1,0.01)#
 #        hit_range = [0.001]#np.arange(0,.01,0.0001)
         av_deg_range = np.arange(10,40,5)#np.logspace(np.log10(0.01),np.log10(18),100)
         power = 2.5
         min_holdings = 5
-        add_fedfunds = 'best'
-        hit_probability = 0.001
+        add_fedfunds = None
+#        hit_probability = 0.001
         for kind in ['er']:#
             network_health = pd.DataFrame(columns = av_deg_range,index = health_threshold)
             iterations = network_health.copy()
@@ -247,6 +294,15 @@ for hit_probability in [0.0001]:
             core_num = network_health.copy()
             bank_nodes = network_health.copy()
             asset_ndoes = network_health.copy()
+            perc_size = network_health.copy()
+            safe_perc_size = network_health.copy()
+            safe_perc_val_size = network_health.copy()
+            cent_avdeg = network_health.copy()
+            perc_avdeg = network_health.copy()
+            safe_perc_avdeg = network_health.copy()
+            safe_perc_bank = network_health.copy()
+            safe_perc_asset = network_health.copy()
+            
             for avg in av_deg_range:
                 round_rvs = generate_distribution(power,min_holdings,num_of_banks=num_of_banks,num_of_assets=num_of_assets,fit=False,fixed_mean=True,average=avg)
             #    fig = plt.figure()
@@ -273,11 +329,12 @@ for hit_probability in [0.0001]:
                     link_temp = sum(G.degree(init_nodes_to_remove).values())
         #            link_counter[th]+=1.0/len(hit_range)*sum(G.degree(init_nodes_to_remove).values())/(sum(G.degree().values()))
                     G.remove_nodes_from(init_nodes_to_remove)
+                    _, cent, perc, safe_perc,safe_perc_val = fragility(G,threshold=th,avg=avg)
                     counter = 0
                     while True:
                         counter +=1
                         b_nodes_to_remove = set([node for node,data in G.nodes_iter(data=True) if \
-                                         data['kind']=='bank' and not('f01' in G_copy[node].keys()) and (data['init_deg']==0 or G.degree(node)/(data['init_deg']**fract_threshold)<=th  or \
+                                         data['kind']=='bank' and (node not in safe_perc) and (data['init_deg']==0 or G.degree(node)/(data['init_deg']**fract_threshold)<=th  or \
                                              (not fract_threshold)*(G.degree(node)<=(th+1))*(np.random.rand()<(th%1)))])#
                         if len(b_nodes_to_remove) == 0:
                             break
@@ -307,8 +364,17 @@ for hit_probability in [0.0001]:
                         temp2 = 0
                         temp3 = 0
                     temp4 = len([node for node, data in G.nodes_iter(data = True) if data['kind']=='bank'])
-                    temp5 = len([node for node, data in G.nodes_iter(data = True) if data['kind']=='asset'])        
-                    output[th] = (counter,len(G),temp,temp2,temp3,temp4,temp5)
+                    temp5 = len([node for node, data in G.nodes_iter(data = True) if data['kind']=='asset']) 
+                    temp6 = len(perc)
+                    temp7 = len(safe_perc)
+                    temp8 = len(safe_perc_val)
+                    temp9 = np.mean(cent.degree().values())
+                    temp10 = np.mean(perc.degree().values())
+                    temp11 = np.mean(safe_perc.degree().values())
+                    temp12 = len([node for node in safe_perc.nodes_iter() if node.startswith('b')])
+                    temp13 = len([node for node in safe_perc.nodes_iter() if node.startswith('a')])
+
+                    output[th] = (counter,len(G),temp,temp2,temp3,temp4,temp5,temp6,temp7,temp8,temp9,temp10,temp11,temp12,temp13)
                     fail_counter = pd.concat([fail_counter,pd.Series(local_counter,name=(int(avg),th))],axis=1)
                     size_counter = pd.concat([size_counter,pd.Series(local_size,name=(int(avg),th))],axis=1)
                 df = pd.DataFrame(output).T
@@ -319,6 +385,14 @@ for hit_probability in [0.0001]:
                 core_num[avg] = df[4]
                 bank_nodes[avg] = df[5]
                 asset_ndoes[avg] = df[6]
+                perc_size[avg] = df[7]
+                safe_perc_size[avg] = df[8]
+                safe_perc_val_size[avg] = df[9]
+                cent_avdeg[avg] = df[10]
+                perc_avdeg[avg] = df[11]
+                safe_perc_avdeg[avg] = df[12]
+                safe_perc_bank[avg] = df[13]
+                safe_perc_asset[avg]=df[14]
             if kind == 'powpow':
                 if fract_threshold:
                     symbol = '.'
@@ -384,10 +458,10 @@ for hit_probability in [0.0001]:
             the number 25 in the break point calculation is a plug number for the dead network surviving nodes
             TODO consider doing the same for the .ix version of the plot
             '''
-            break_point = [(col,min((network_health[col][network_health[col]<(0.01*(num_of_assets+num_of_banks))]).index)) for col in network_health.columns if len((network_health[col][network_health[col]<(0.01*(num_of_assets+num_of_banks))]).index)>0]
-            bpdf = pd.Series(zip(*break_point)[1],index=zip(*break_point)[0])
-            plt.figure()
-            bpdf.plot()
+#            break_point = [(col,min((network_health[col][network_health[col]<(0.01*(num_of_assets+num_of_banks))]).index)) for col in network_health.columns if len((network_health[col][network_health[col]<(0.01*(num_of_assets+num_of_banks))]).index)>0]
+#            bpdf = pd.Series(zip(*break_point)[1],index=zip(*break_point)[0])
+#            plt.figure()
+#            bpdf.plot()
     #    zu = bpdf.diff().sort_values()
     #    zu = zu[np.insert((np.diff(zu.values)>1e-6) | (np.diff(zu.values)==0),0,True)]
     #    if len(list_to_plot)==0:
